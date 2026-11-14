@@ -1,0 +1,171 @@
+name: Build CDDA A32 optimized APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      cdda_ref:
+        description: "Cataclysm-DDA branch, tag or commit"
+        required: true
+        default: "master"
+      bubble:
+        description: "Reality bubble MAPSIZE (odd: 7 = fast, 9 = safer)"
+        required: true
+        default: "7"
+      variant:
+        description: "Optimization preset"
+        required: true
+        default: "performance"
+        type: choice
+        options:
+          - performance
+          - balanced
+permissions:
+  contents: write
+
+concurrency:
+  group: cdda-a32-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gettext ccache libvips-dev python3-venv
+          python3 -m venv /tmp/gfxvenv
+          /tmp/gfxvenv/bin/pip install --quiet pyvips
+
+      - name: Restore Gradle and ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.ccache
+          key: cdda-a32-${{ inputs.cdda_ref }}-v1
+          restore-keys: |
+            cdda-a32-${{ inputs.cdda_ref }}-
+            cdda-a32-
+
+      - name: Clone Cataclysm-DDA
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ inputs.cdda_ref }}" \
+            https://github.com/CleverRaven/Cataclysm-DDA.git cdda
+          cd cdda
+          git rev-parse HEAD | tee ../CDDA_COMMIT.txt
+
+      - name: Apply A32 optimizations
+        run: |
+          set -euo pipefail
+          cd cdda
+          bash ../scripts/apply_optimizations.sh "${{ inputs.bubble }}" "${{ inputs.variant }}"
+
+      - name: Compose graphics tilesets
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/I-am-Erk/CDDA-Tilesets.git tilesets
+          cd tilesets
+          git sparse-checkout set gfx/UltimateCataclysm gfx/Larwick_Overmap
+          cd ..
+          mkdir -p cdda/gfx/UltimateCataclysm cdda/gfx/Larwick_Overmap
+          /tmp/gfxvenv/bin/python cdda/tools/gfx_tools/compose.py \
+            --use-all --obsolete-fillers --feedback CONCISE --format-json --loglevel INFO \
+            tilesets/gfx/UltimateCataclysm cdda/gfx/UltimateCataclysm
+          /tmp/gfxvenv/bin/python cdda/tools/gfx_tools/compose.py \
+            --use-all --feedback CONCISE --format-json --loglevel INFO \
+            tilesets/gfx/Larwick_Overmap cdda/gfx/Larwick_Overmap
+          for ts in UltimateCataclysm Larwick_Overmap; do
+            cp "tilesets/gfx/$ts/tileset.txt" "cdda/gfx/$ts/"
+            if [ -f "tilesets/gfx/$ts/fallback.png" ]; then
+              cp "tilesets/gfx/$ts/fallback.png" "cdda/gfx/$ts/"
+            fi
+            if [ -f "tilesets/gfx/$ts/layering.json" ]; then
+              cp "tilesets/gfx/$ts/layering.json" "cdda/gfx/$ts/"
+            fi
+          done
+          du -sh cdda/gfx/UltimateCataclysm cdda/gfx/Larwick_Overmap
+
+      - name: Configure signing
+        env:
+          KEYSTORE_B64: ${{ secrets.CDDA_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.CDDA_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.CDDA_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.CDDA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "ERROR: CDDA_KEYSTORE_B64 secret is not set" >&2
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > cdda/android/app/release.keystore
+          cat > cdda/android/keystore.properties <<EOF
+          storeFile=$GITHUB_WORKSPACE/cdda/android/app/release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          chmod 600 cdda/android/app/release.keystore cdda/android/keystore.properties
+
+      - name: Build release APK
+        env:
+          UPSTREAM_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          ccache -M 5G
+          ccache -z
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx4g/' cdda/android/gradle.properties
+          cd cdda/android
+          chmod +x gradlew
+          ./gradlew --no-daemon \
+            -Pj=4 \
+            -Pabi_arm_32=false \
+            -Pabi_arm_64=true \
+            -Plocalize=true \
+            -Poverride_version="a32-opt-${GITHUB_RUN_NUMBER}" \
+            assembleExperimentalRelease
+          ccache -s || true
+
+      - name: Collect APK and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find cdda/android/app/build/outputs/apk/experimental/release \
+            -name '*.apk' -exec cp -v {} out/ \;
+          ls -lh out
+          sha256sum out/*.apk | tee out/SHA256SUMS.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdda-a32-opt-apk-${{ github.run_number }}
+          path: |
+            out/*.apk
+            out/SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="a32-opt-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" out/*.apk out/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CDDA A32 optimized build #${GITHUB_RUN_NUMBER}" \
+            --notes "Automatic build from Cataclysm-DDA ${{ inputs.cdda_ref }} ($(cat CDDA_COMMIT.txt)). MAPSIZE=${{ inputs.bubble }}, preset=${{ inputs.variant }}." \
+            --prerelease

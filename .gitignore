@@ -1,0 +1,9 @@
+*.apk
+*.aab
+*.keystore
+*.jks
+keystore.properties
+out/
+cdda/
+tilesets/
+CDDA_COMMIT.txt
