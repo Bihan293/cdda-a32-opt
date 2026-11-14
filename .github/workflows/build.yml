@@ -7,18 +7,6 @@ on:
         description: "Cataclysm-DDA branch, tag or commit"
         required: true
         default: "master"
-      bubble:
-        description: "Reality bubble MAPSIZE (odd: 7 = fast, 9 = safer)"
-        required: true
-        default: "7"
-      variant:
-        description: "Optimization preset"
-        required: true
-        default: "performance"
-        type: choice
-        options:
-          - performance
-          - balanced
 permissions:
   contents: write
 
@@ -68,11 +56,11 @@ jobs:
           cd cdda
           git rev-parse HEAD | tee ../CDDA_COMMIT.txt
 
-      - name: Apply A32 optimizations
+      - name: Apply pure performance patches
         run: |
           set -euo pipefail
           cd cdda
-          bash ../scripts/apply_optimizations.sh "${{ inputs.bubble }}" "${{ inputs.variant }}"
+          bash ../scripts/apply_optimizations.sh
 
       - name: Compose graphics tilesets
         run: |
@@ -167,5 +155,5 @@ jobs:
           gh release create "$tag" out/*.apk out/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "CDDA A32 optimized build #${GITHUB_RUN_NUMBER}" \
-            --notes "Automatic build from Cataclysm-DDA ${{ inputs.cdda_ref }} ($(cat CDDA_COMMIT.txt)). MAPSIZE=${{ inputs.bubble }}, preset=${{ inputs.variant }}." \
+            --notes "Pure performance build from Cataclysm-DDA ${{ inputs.cdda_ref }} ($(cat CDDA_COMMIT.txt)). Same world, balance and defaults; only compiler, render-present and memory changes." \
             --prerelease
