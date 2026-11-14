@@ -62,6 +62,20 @@ jobs:
           cd cdda
           bash ../scripts/apply_optimizations.sh
 
+      - name: Add official Russian translation
+        run: |
+          set -euo pipefail
+          # Real .po files are pulled from Transifex for official releases, not
+          # stored in the git repo.  Take the official experimental translation
+          # archive and compile only Russian; no gameplay files are touched.
+          curl -L --fail --retry 3 \
+            -o /tmp/cdda-translations.tar.gz \
+            "https://github.com/CleverRaven/Cataclysm-DDA/releases/download/cdda-experimental-2026-11-14-0749/cdda-translations-2026-11-14-0749.tar.gz"
+          tar -xzf /tmp/cdda-translations.tar.gz -C /tmp lang/po/ru.po
+          mkdir -p cdda/lang/mo/ru/LC_MESSAGES
+          msgfmt -f -o cdda/lang/mo/ru/LC_MESSAGES/cataclysm-dda.mo /tmp/lang/po/ru.po
+          ls -lh cdda/lang/mo/ru/LC_MESSAGES/cataclysm-dda.mo
+
       - name: Compose graphics tilesets
         run: |
           set -euo pipefail
@@ -123,7 +137,7 @@ jobs:
             -Pj=4 \
             -Pabi_arm_32=false \
             -Pabi_arm_64=true \
-            -Plocalize=true \
+            -Plocalize=false \
             -Poverride_version="a32-opt-${GITHUB_RUN_NUMBER}" \
             assembleExperimentalRelease
           ccache -s || true
